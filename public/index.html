@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TGRTC - Live Video Streaming</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>TGRTC Live Video Streaming</h1>
+    </header>
+
+    <div class="login-container" id="loginContainer">
+      <h2>Join a Room</h2>
+      <div class="form-group">
+        <label for="userId">User ID:</label>
+        <input type="text" id="userId" placeholder="Enter your user ID">
+      </div>
+      <div class="form-group">
+        <label for="roomId">Room ID (optional):</label>
+        <input type="text" id="roomId" placeholder="Enter room ID or leave empty to create a new room">
+      </div>
+      <div class="form-group">
+        <label for="roleSelect">Role:</label>
+        <select id="roleSelect">
+          <option value="anchor">Anchor (Broadcaster)</option>
+          <option value="audience">Audience</option>
+        </select>
+      </div>
+      <button id="joinBtn" class="btn">Join Room</button>
+    </div>
+
+    <div class="room-container hidden" id="roomContainer">
+      <div class="room-info">
+        <h2>Room: <span id="roomIdDisplay"></span></h2>
+        <div class="controls">
+          <button id="toggleVideoBtn" class="btn">Stop Video</button>
+          <button id="toggleAudioBtn" class="btn">Stop Audio</button>
+          <button id="switchRoleBtn" class="btn">Switch Role</button>
+          <button id="leaveBtn" class="btn btn-danger">Leave Room</button>
+        </div>
+      </div>
+
+      <div class="video-container">
+        <div class="video-grid" id="videoGrid">
+          <div class="video-item local-video">
+            <video id="localVideo" autoplay muted></video>
+            <div class="video-label">You</div>
+          </div>
+          <script>
+            // Fix Firefox compatibility issue with playsinline
+            document.getElementById('localVideo').setAttribute('playsinline', '');
+            document.getElementById('localVideo').playsInline = true;
+          </script>
+          <!-- Remote videos will be added here dynamically -->
+        </div>
+      </div>
+
+      <div class="participants">
+        <h3>Participants</h3>
+        <ul id="participantsList"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/tgrtc.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
