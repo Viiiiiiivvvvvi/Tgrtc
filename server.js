@@ -3,7 +3,7 @@ const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
-const wrtc = require('wrtc'); // For server-side WebRTC
+const wrtc = require('wrtc');
 
 const app = express();
 const server = http.createServer(app);
@@ -15,8 +15,33 @@ app.use(express.static(path.join(__dirname, 'public')));
 // Store active rooms
 const rooms = new Map();
 
-// Store server-side peer connections for relay
-const relayConnections = new Map(); // roomId_userId -> { pc, streams }
+// Store SFU connections
+const sfuConnections = new Map(); // roomId -> { publishers: Map<userId, {pc, stream}>, subscribers: Map<userId, Map<targetId, pc>> }
+
+// Helper function to create peer connection
+function createPeerConnection(userId, roomId) {
+  const pc = new wrtc.RTCPeerConnection({
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' }
+    ]
+  });
+  
+  pc.onicecandidate = ({ candidate }) => {
+    if (candidate) {
+      const room = rooms.get(roomId);
+      const participant = room.participants.get(userId);
+      if (participant) {
+        io.to(participant.socketId).emit('sfu-ice-candidate', {
+          candidate,
+          userId
+        });
+      }
+    }
+  };
+
+  return pc;
+}
 
 // Socket.io connection handling
 io.on('connection', (socket) => {
@@ -24,326 +49,213 @@ io.on('connection', (socket) => {
 
   // Handle room creation
   socket.on('create-room', ({ userId, roomId = null, isAnchor = true }) => {
-    // Generate room ID if not provided
     const newRoomId = roomId || uuidv4();
     
-    // Create or update room
     if (!rooms.has(newRoomId)) {
       rooms.set(newRoomId, {
         id: newRoomId,
         anchor: isAnchor ? userId : null,
         participants: new Map()
       });
+      
+      // Initialize SFU connections for the room
+      sfuConnections.set(newRoomId, {
+        publishers: new Map(),
+        subscribers: new Map()
+      });
     }
     
     const room = rooms.get(newRoomId);
     
-    // Add participant to room
     room.participants.set(userId, {
       id: userId,
       socketId: socket.id,
       isAnchor: isAnchor
     });
     
-    // Join socket room
     socket.join(newRoomId);
     
-    // Send room info to client
     socket.emit('room-created', {
       roomId: newRoomId,
       userId,
-      isAnchor,
-      participants: Array.from(room.participants.values())
-    });
-    
-    // Notify other participants
-    socket.to(newRoomId).emit('user-joined', {
-      userId,
       isAnchor
     });
-    
-    console.log(`User ${userId} created/joined room ${newRoomId}`);
   });
 
-  // Handle room joining
-  socket.on('join-room', ({ userId, roomId, isAnchor = false }) => {
-    // Check if room exists
-    if (!rooms.has(roomId)) {
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
-    
+  // Handle publishing stream to SFU
+  socket.on('publish', async ({ roomId, userId, sdp }) => {
     const room = rooms.get(roomId);
-    
-    // Add participant to room
-    room.participants.set(userId, {
-      id: userId,
-      socketId: socket.id,
-      isAnchor: isAnchor
-    });
-    
-    // Join socket room
-    socket.join(roomId);
-    
-    // Send room info to client
-    socket.emit('room-joined', {
-      roomId,
-      userId,
-      isAnchor,
-      participants: Array.from(room.participants.values())
-    });
-    
-    // Notify other participants
-    socket.to(roomId).emit('user-joined', {
-      userId,
-      isAnchor
-    });
-    
-    console.log(`User ${userId} joined room ${roomId}`);
-  });
+    if (!room) return;
 
-  // Handle WebRTC signaling
-  socket.on('offer', ({ roomId, userId, targetId, sdp, useRelay = false }) => {
-    const targetSocket = rooms.get(roomId)?.participants.get(targetId)?.socketId;
+    const sfuRoom = sfuConnections.get(roomId);
+    if (!sfuRoom) return;
+
+    let publisher = sfuRoom.publishers.get(userId);
     
-    if (useRelay) {
-      // Handle relay mode
-      handleRelayOffer(roomId, userId, targetId, sdp, socket);
-    } else {
-      // Direct peer-to-peer mode
-      io.to(targetSocket).emit('offer', {
-        userId,
-        sdp
-      });
+    if (!publisher) {
+      const pc = createPeerConnection(userId, roomId);
+      
+      pc.ontrack = ({ track, streams }) => {
+        const stream = streams[0];
+        sfuRoom.publishers.set(userId, { pc, stream });
+        
+        // Forward the new stream to all existing subscribers
+        room.participants.forEach((participant, participantId) => {
+          if (participantId !== userId) {
+            handleSubscription(roomId, participantId, userId);
+          }
+        });
+      };
+
+      try {
+        await pc.setRemoteDescription(new wrtc.RTCSessionDescription(sdp));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        
+        socket.emit('sfu-answer', {
+          sdp: pc.localDescription,
+          userId
+        });
+        
+        sfuRoom.publishers.set(userId, { pc });
+      } catch (error) {
+        console.error('Error handling publish:', error);
+      }
     }
   });
 
-  socket.on('answer', ({ roomId, userId, targetId, sdp, useRelay = false }) => {
-    const targetSocket = rooms.get(roomId)?.participants.get(targetId)?.socketId;
-    
-    if (useRelay) {
-      // Handle relay mode
-      handleRelayAnswer(roomId, userId, targetId, sdp, socket);
-    } else {
-      // Direct peer-to-peer mode
-      io.to(targetSocket).emit('answer', {
-        userId,
-        sdp
-      });
-    }
+  // Handle subscribing to a stream
+  socket.on('subscribe', async ({ roomId, userId, targetId }) => {
+    handleSubscription(roomId, userId, targetId);
   });
 
-  socket.on('ice-candidate', ({ roomId, userId, targetId, candidate, useRelay = false }) => {
-    const targetSocket = rooms.get(roomId)?.participants.get(targetId)?.socketId;
-    
-    if (useRelay) {
-      // Handle relay mode
-      handleRelayIceCandidate(roomId, userId, targetId, candidate, socket);
-    } else {
-      // Direct peer-to-peer mode
-      io.to(targetSocket).emit('ice-candidate', {
-        userId,
-        candidate
-      });
-    }
-  });
+  // Handle ICE candidates for SFU
+  socket.on('ice-candidate', ({ roomId, userId, targetId, candidate }) => {
+    const sfuRoom = sfuConnections.get(roomId);
+    if (!sfuRoom) return;
 
-  // Handle role switching (audience to anchor or vice versa)
-  socket.on('switch-role', ({ roomId, userId, isAnchor }) => {
-    if (!rooms.has(roomId)) return;
-    
-    const room = rooms.get(roomId);
-    const participant = room.participants.get(userId);
-    
-    if (participant) {
-      participant.isAnchor = isAnchor;
-      io.to(roomId).emit('role-switched', { userId, isAnchor });
-    }
-  });
-
-  // Handle user leaving
-  socket.on('leave-room', ({ roomId, userId }) => {
-    handleUserLeaving(roomId, userId);
-  });
-
-  // Request to use relay
-  socket.on('request-relay', ({ roomId, userId, targetId }) => {
-    console.log(`Relay requested from ${userId} to ${targetId} in room ${roomId}`);
-    
-    // Notify target user to switch to relay mode
-    const targetSocket = rooms.get(roomId)?.participants.get(targetId)?.socketId;
-    if (targetSocket) {
-      io.to(targetSocket).emit('use-relay', { userId });
-    }
-    
-    // Notify requesting user that relay is ready
-    socket.emit('relay-ready', { targetId });
-  });
-
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log(`Client disconnected: ${socket.id}`);
-    
-    // Find and remove user from all rooms
-    rooms.forEach((room, roomId) => {
-      room.participants.forEach((participant, userId) => {
-        if (participant.socketId === socket.id) {
-          handleUserLeaving(roomId, userId);
+    if (targetId) {
+      // Subscriber ICE candidate
+      const subscribers = sfuRoom.subscribers.get(userId);
+      if (subscribers) {
+        const pc = subscribers.get(targetId);
+        if (pc) {
+          pc.addIceCandidate(new wrtc.RTCIceCandidate(candidate));
         }
-      });
-    });
+      }
+    } else {
+      // Publisher ICE candidate
+      const publisher = sfuRoom.publishers.get(userId);
+      if (publisher && publisher.pc) {
+        publisher.pc.addIceCandidate(new wrtc.RTCIceCandidate(candidate));
+      }
+    }
   });
 
-  // Helper function to handle user leaving
-  function handleUserLeaving(roomId, userId) {
-    if (!rooms.has(roomId)) return;
-    
-    const room = rooms.get(roomId);
-    
-    // Remove participant from room
-    room.participants.delete(userId);
-    
-    // Notify other participants
-    socket.to(roomId).emit('user-left', { userId });
-    
-    console.log(`User ${userId} left room ${roomId}`);
-    
-    // Clean up relay connections for this user
-    cleanupRelayConnections(roomId, userId);
-    
-    // Clean up empty rooms
-    if (room.participants.size === 0) {
-      rooms.delete(roomId);
-      console.log(`Room ${roomId} deleted (empty)`);
-    }
-  }
+  // Handle user disconnect
+  socket.on('disconnect', () => {
+    handleUserDisconnect(socket);
+  });
 });
 
-// Relay handling functions
-async function handleRelayOffer(roomId, senderId, receiverId, sdp, socket) {
-  const relayKeyA = `${roomId}_${senderId}_${receiverId}`; // Sender to receiver
-  const relayKeyB = `${roomId}_${receiverId}_${senderId}`; // Receiver to sender
+// Helper function to handle subscriptions
+async function handleSubscription(roomId, userId, targetId) {
+  const sfuRoom = sfuConnections.get(roomId);
+  if (!sfuRoom) return;
+
+  const publisher = sfuRoom.publishers.get(targetId);
+  if (!publisher || !publisher.stream) return;
+
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  const subscriber = room.participants.get(userId);
+  if (!subscriber) return;
+
+  if (!sfuRoom.subscribers.has(userId)) {
+    sfuRoom.subscribers.set(userId, new Map());
+  }
+
+  const subscriberPCs = sfuRoom.subscribers.get(userId);
   
-  // Create server-side peer connection for sender if it doesn't exist
-  if (!relayConnections.has(relayKeyA)) {
-    const pcSender = new wrtc.RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
+  if (!subscriberPCs.has(targetId)) {
+    const pc = createPeerConnection(userId, roomId);
+    
+    publisher.stream.getTracks().forEach(track => {
+      pc.addTrack(track, publisher.stream);
     });
-    
-    relayConnections.set(relayKeyA, {
-      pc: pcSender,
-      streams: new Map()
-    });
-    
-    // Handle ICE candidates from sender's PC
-    pcSender.onicecandidate = (event) => {
-      if (event.candidate) {
-        // Send ICE candidate to sender
-        socket.emit('ice-candidate', {
-          userId: receiverId, // Pretend it's from the receiver
-          candidate: event.candidate
-        });
-      }
-    };
-    
-    // Handle tracks from sender to relay to receiver
-    pcSender.ontrack = (event) => {
-      const relayInfo = relayConnections.get(relayKeyA);
-      const stream = event.streams[0];
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
       
-      // Store the stream
-      relayInfo.streams.set(event.track.id, {
-        stream,
-        track: event.track
+      io.to(subscriber.socketId).emit('sfu-offer', {
+        sdp: pc.localDescription,
+        userId: targetId
       });
       
-      // If we have a connection to the receiver, add this track
-      if (relayConnections.has(relayKeyB)) {
-        const receiverPC = relayConnections.get(relayKeyB).pc;
-        receiverPC.addTrack(event.track, stream);
-        
-        // Create a new offer to send to the receiver
-        receiverPC.createOffer()
-          .then(offer => receiverPC.setLocalDescription(offer))
-          .then(() => {
-            const receiverSocket = rooms.get(roomId)?.participants.get(receiverId)?.socketId;
-            if (receiverSocket) {
-              io.to(receiverSocket).emit('offer', {
-                userId: senderId, // Pretend it's from the sender
-                sdp: receiverPC.localDescription
-              });
-            }
-          })
-          .catch(err => console.error('Error creating relay offer:', err));
+      subscriberPCs.set(targetId, pc);
+    } catch (error) {
+      console.error('Error creating subscription:', error);
+    }
+  }
+}
+
+// Helper function to handle user disconnect
+function handleUserDisconnect(socket) {
+  let disconnectedUser = null;
+  let disconnectedRoom = null;
+
+  rooms.forEach((room, roomId) => {
+    room.participants.forEach((participant, userId) => {
+      if (participant.socketId === socket.id) {
+        disconnectedUser = userId;
+        disconnectedRoom = roomId;
       }
-    };
-  }
-  
-  // Get the sender's peer connection
-  const senderRelay = relayConnections.get(relayKeyA);
-  
-  // Set the remote description (offer from sender)
-  try {
-    await senderRelay.pc.setRemoteDescription(new wrtc.RTCSessionDescription(sdp));
-    
-    // Create answer
-    const answer = await senderRelay.pc.createAnswer();
-    await senderRelay.pc.setLocalDescription(answer);
-    
-    // Send answer back to sender
-    socket.emit('answer', {
-      userId: receiverId, // Pretend it's from the receiver
-      sdp: senderRelay.pc.localDescription
     });
-  } catch (error) {
-    console.error('Error handling relay offer:', error);
-  }
-}
+  });
 
-async function handleRelayAnswer(roomId, senderId, receiverId, sdp, socket) {
-  const relayKey = `${roomId}_${receiverId}_${senderId}`; // Receiver to sender relay
-  
-  if (relayConnections.has(relayKey)) {
-    const relay = relayConnections.get(relayKey);
-    
-    try {
-      // Set the remote description (answer from receiver)
-      await relay.pc.setRemoteDescription(new wrtc.RTCSessionDescription(sdp));
-    } catch (error) {
-      console.error('Error handling relay answer:', error);
-    }
-  }
-}
+  if (disconnectedUser && disconnectedRoom) {
+    const room = rooms.get(disconnectedRoom);
+    const sfuRoom = sfuConnections.get(disconnectedRoom);
 
-async function handleRelayIceCandidate(roomId, senderId, receiverId, candidate, socket) {
-  const relayKey = `${roomId}_${receiverId}_${senderId}`; // Direction is important
-  
-  if (relayConnections.has(relayKey)) {
-    const relay = relayConnections.get(relayKey);
-    
-    try {
-      await relay.pc.addIceCandidate(new wrtc.RTCIceCandidate(candidate));
-    } catch (error) {
-      console.error('Error handling relay ICE candidate:', error);
+    if (room) {
+      room.participants.delete(disconnectedUser);
+      if (room.participants.size === 0) {
+        rooms.delete(disconnectedRoom);
+      }
     }
-  }
-}
 
-function cleanupRelayConnections(roomId, userId) {
-  // Find and close all relay connections involving this user
-  for (const [key, relay] of relayConnections.entries()) {
-    if (key.includes(`${roomId}_${userId}`)) {
-      // Close the peer connection
-      relay.pc.close();
-      
-      // Remove from map
-      relayConnections.delete(key);
-      
-      console.log(`Cleaned up relay connection: ${key}`);
+    if (sfuRoom) {
+      // Clean up publisher
+      const publisher = sfuRoom.publishers.get(disconnectedUser);
+      if (publisher) {
+        if (publisher.pc) publisher.pc.close();
+        sfuRoom.publishers.delete(disconnectedUser);
+      }
+
+      // Clean up subscriber
+      const subscribers = sfuRoom.subscribers.get(disconnectedUser);
+      if (subscribers) {
+        subscribers.forEach(pc => pc.close());
+        sfuRoom.subscribers.delete(disconnectedUser);
+      }
+
+      // Clean up other subscribers to this user
+      sfuRoom.subscribers.forEach(subscriberPCs => {
+        const pc = subscriberPCs.get(disconnectedUser);
+        if (pc) {
+          pc.close();
+          subscriberPCs.delete(disconnectedUser);
+        }
+      });
+
+      if (sfuRoom.publishers.size === 0 && sfuRoom.subscribers.size === 0) {
+        sfuConnections.delete(disconnectedRoom);
+      }
     }
+
+    socket.to(disconnectedRoom).emit('user-left', { userId: disconnectedUser });
   }
 }
 
