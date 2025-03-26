@@ -1,12 +1,20 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
+const fs = require('fs');
 const socketIo = require('socket.io');
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const wrtc = require('wrtc');
 
+// HTTPS options
+const options = {
+  key: fs.readFileSync(path.join(__dirname, 'ssl/key.pem')),
+  cert: fs.readFileSync(path.join(__dirname, 'ssl/cert.pem'))
+};
+
 const app = express();
-const server = http.createServer(app);
+const server = https.createServer(options, app);
 const io = socketIo(server);
 
 // Serve static files
@@ -87,6 +95,112 @@ io.on('connection', (socket) => {
     });
   });
 
+  // Handle joining existing room
+  socket.on('join-room', ({ roomId, userId, isAnchor = false }) => {
+    console.log(`User ${userId} joining room ${roomId}`);
+    
+    // Check if room exists
+    if (!rooms.has(roomId)) {
+      socket.emit('error', { message: 'Room not found' });
+      return;
+    }
+    
+    const room = rooms.get(roomId);
+    
+    // Add user to room participants
+    room.participants.set(userId, {
+      id: userId,
+      socketId: socket.id,
+      isAnchor: isAnchor
+    });
+    
+    // Join the socket.io room
+    socket.join(roomId);
+    
+    // Notify the user they've joined the room
+    socket.emit('room-joined', {
+      roomId,
+      userId,
+      isAnchor,
+      participants: Array.from(room.participants.entries())
+        .filter(([id]) => id !== userId)
+        .map(([id, participant]) => ({
+          id,
+          isAnchor: participant.isAnchor
+        }))
+    });
+    
+    // Notify other participants that a new user has joined
+    socket.to(roomId).emit('user-joined', {
+      userId,
+      isAnchor
+    });
+    
+    // If there are publishers in the room, set up subscriptions for the new user
+    const sfuRoom = sfuConnections.get(roomId);
+    if (sfuRoom && sfuRoom.publishers.size > 0) {
+      sfuRoom.publishers.forEach((publisher, publisherId) => {
+        if (publisherId !== userId && publisher.stream) {
+          handleSubscription(roomId, userId, publisherId);
+        }
+      });
+    }
+  });
+
+  // Handle WebRTC offer
+  socket.on('offer', async ({ roomId, userId, targetId, sdp }) => {
+    console.log(`Received offer from ${userId} to ${targetId}`);
+    
+    const room = rooms.get(roomId);
+    if (!room) return;
+    
+    const targetParticipant = room.participants.get(targetId);
+    if (!targetParticipant) return;
+    
+    // Forward the offer to the target user
+    io.to(targetParticipant.socketId).emit('offer', {
+      roomId,
+      userId,
+      sdp
+    });
+  });
+  
+  // Handle WebRTC answer
+  socket.on('answer', async ({ roomId, userId, targetId, sdp }) => {
+    console.log(`Received answer from ${userId} to ${targetId}`);
+    
+    const room = rooms.get(roomId);
+    if (!room) return;
+    
+    const targetParticipant = room.participants.get(targetId);
+    if (!targetParticipant) return;
+    
+    // Forward the answer to the target user
+    io.to(targetParticipant.socketId).emit('answer', {
+      roomId,
+      userId,
+      sdp
+    });
+  });
+  
+  // Handle ICE candidates
+  socket.on('ice-candidate', async ({ roomId, userId, targetId, candidate }) => {
+    console.log(`Received ICE candidate from ${userId} to ${targetId}`);
+    
+    const room = rooms.get(roomId);
+    if (!room) return;
+    
+    const targetParticipant = room.participants.get(targetId);
+    if (!targetParticipant) return;
+    
+    // Forward the ICE candidate to the target user
+    io.to(targetParticipant.socketId).emit('ice-candidate', {
+      roomId,
+      userId,
+      candidate
+    });
+  });
+  
   // Handle publishing stream to SFU
   socket.on('publish', async ({ roomId, userId, sdp }) => {
     const room = rooms.get(roomId);

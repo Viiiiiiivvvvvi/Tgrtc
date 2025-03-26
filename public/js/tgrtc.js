@@ -24,8 +24,23 @@ class TGRTC {
     this.rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' }
-      ]
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        {
+          urls: 'turn:numb.viagenie.ca',
+          username: 'webrtc@live.com',
+          credential: 'muazkh'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ],
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: 'all'
     };
   }
 
@@ -328,6 +343,7 @@ class TGRTC {
       return this.peerConnections.get(userId);
     }
     
+    console.log('Creating peer connection with ICE config:', JSON.stringify(this.rtcConfig));
     const pc = new RTCPeerConnection(this.rtcConfig);
     
     // Add local stream tracks to peer connection
@@ -352,6 +368,28 @@ class TGRTC {
     // Handle connection state changes
     pc.onconnectionstatechange = () => {
       console.log(`Connection state with ${userId}: ${pc.connectionState}`);
+      
+      if (pc.connectionState === 'failed') {
+        console.log(`Connection with ${userId} failed. Attempting to restart ICE...`);
+        
+        // Try to restart ICE
+        if (this.isAnchor) {
+          setTimeout(() => {
+            console.log(`Restarting ICE for ${userId}...`);
+            this._createAndSendOffer(userId, { iceRestart: true });
+          }, 1000);
+        }
+      }
+    };
+    
+    // Handle ICE connection state changes
+    pc.oniceconnectionstatechange = () => {
+      console.log(`ICE connection state with ${userId}: ${pc.iceConnectionState}`);
+    };
+    
+    // Log ICE gathering state changes
+    pc.onicegatheringstatechange = () => {
+      console.log(`ICE gathering state with ${userId}: ${pc.iceGatheringState}`);
     };
     
     // Handle remote tracks
@@ -397,11 +435,18 @@ class TGRTC {
    * @param {string} userId - User ID
    * @private
    */
-  async _createAndSendOffer(userId) {
+  async _createAndSendOffer(userId, options = {}) {
     const pc = this._getPeerConnection(userId);
     
     try {
-      const offer = await pc.createOffer();
+      const offerOptions = {};
+      
+      // Add iceRestart option if specified
+      if (options.iceRestart) {
+        offerOptions.iceRestart = true;
+      }
+      
+      const offer = await pc.createOffer(offerOptions);
       await pc.setLocalDescription(offer);
       
       this.socket.emit('offer', {
