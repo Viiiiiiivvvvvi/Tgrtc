@@ -532,6 +532,11 @@ class TGRTC {
    */
   async startLocalVideo(options = {}) {
     try {
+      // Check if mediaDevices is supported
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('WebRTC is not supported in this browser. Please use Chrome, Firefox, or Safari.');
+      }
+
       // Create local stream if not exists
       if (!this.localStream) {
         this.localStream = new MediaStream();
@@ -636,6 +641,11 @@ class TGRTC {
    */
   async startLocalAudio(options = {}) {
     try {
+      // Check if mediaDevices is supported
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('WebRTC is not supported in this browser. Please use Chrome, Firefox, or Safari.');
+      }
+
       // Create local stream if not exists
       if (!this.localStream) {
         this.localStream = new MediaStream();
