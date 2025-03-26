@@ -16,11 +16,13 @@ class TGRTC {
     this.socket = null;
     this.localStream = null;
     this.remoteStreams = new Map(); // userId -> stream
-    this.peerConnections = new Map(); // userId -> RTCPeerConnection
+    this.sfuConnection = null; // Single connection to SFU for publishing
+    this.sfuSubscriptions = new Map(); // userId -> RTCPeerConnection for subscribing
     this.roomId = null;
     this.userId = null;
     this.isAnchor = false;
     this.eventHandlers = new Map();
+    // Default RTC configuration with extensive STUN/TURN servers
     this.rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -28,6 +30,10 @@ class TGRTC {
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
         { urls: 'stun:stun4.l.google.com:19302' },
+        { urls: 'stun:stun.stunprotocol.org:3478' },
+        { urls: 'stun:stun.sipnet.net:3478' },
+        { urls: 'stun:stun.ideasip.com:3478' },
+        { urls: 'stun:stun.iptel.org:3478' },
         {
           urls: 'turn:numb.viagenie.ca',
           username: 'webrtc@live.com',
@@ -37,10 +43,38 @@ class TGRTC {
           urls: 'turn:openrelay.metered.ca:80',
           username: 'openrelayproject',
           credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:relay.metered.ca:80',
+          username: 'c9e9f2f0a6f2f0e9a8f0',
+          credential: 'Xr7/iQkXDMGCwVZm'
+        },
+        {
+          urls: 'turn:relay.metered.ca:443',
+          username: 'c9e9f2f0a6f2f0e9a8f0',
+          credential: 'Xr7/iQkXDMGCwVZm'
+        },
+        {
+          urls: 'turn:relay.metered.ca:443?transport=tcp',
+          username: 'c9e9f2f0a6f2f0e9a8f0',
+          credential: 'Xr7/iQkXDMGCwVZm'
         }
       ],
       iceCandidatePoolSize: 10,
-      iceTransportPolicy: 'all'
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+      sdpSemantics: 'unified-plan'
     };
   }
 
@@ -129,20 +163,25 @@ class TGRTC {
           this._handleUserLeft(data);
         });
         
-        this.socket.on('offer', (data) => {
-          this._handleOffer(data);
+        // SFU specific events
+        this.socket.on('sfu-offer', (data) => {
+          this._handleSfuOffer(data);
         });
         
-        this.socket.on('answer', (data) => {
-          this._handleAnswer(data);
+        this.socket.on('sfu-answer', (data) => {
+          this._handleSfuAnswer(data);
         });
         
-        this.socket.on('ice-candidate', (data) => {
-          this._handleIceCandidate(data);
+        this.socket.on('sfu-ice-candidate', (data) => {
+          this._handleSfuIceCandidate(data);
         });
         
         this.socket.on('role-switched', (data) => {
           this._handleRoleSwitched(data);
+        });
+        
+        this.socket.on('restart-connection', (data) => {
+          this._handleRestartConnection(data);
         });
         
         this.socket.on('error', (data) => {
@@ -331,6 +370,21 @@ class TGRTC {
       }
     }
   }
+  
+  /**
+   * Handle restart connection request
+   * @param {Object} data - Restart data
+   * @private
+   */
+  _handleRestartConnection(data) {
+    console.log(`Received restart connection request from ${data.userId}`);
+    
+    // If we are the anchor, create and send a new offer with ICE restart
+    if (this.isAnchor) {
+      console.log(`Creating new offer with ICE restart for ${data.targetId}`);
+      this._createAndSendOffer(data.targetId, { iceRestart: true });
+    }
+  }
 
   /**
    * Create peer connection
@@ -373,12 +427,25 @@ class TGRTC {
         console.log(`Connection with ${userId} failed. Attempting to restart ICE...`);
         
         // Try to restart ICE
-        if (this.isAnchor) {
-          setTimeout(() => {
-            console.log(`Restarting ICE for ${userId}...`);
+        setTimeout(() => {
+          console.log(`Restarting ICE for ${userId}...`);
+          
+          // Both peers should try to restart the connection
+          if (this.isAnchor) {
             this._createAndSendOffer(userId, { iceRestart: true });
-          }, 1000);
-        }
+          } else {
+            // For non-anchors, send a restart request to the anchor
+            this.socket.emit('restart-request', {
+              roomId: this.roomId,
+              userId: this.userId,
+              targetId: userId
+            });
+          }
+        }, 1000);
+      } else if (pc.connectionState === 'connected') {
+        console.log(`Successfully connected to ${userId}`);
+      } else if (pc.connectionState === 'disconnected') {
+        console.log(`Connection with ${userId} disconnected. Waiting for reconnection...`);
       }
     };
     

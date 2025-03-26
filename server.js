@@ -201,6 +201,24 @@ io.on('connection', (socket) => {
     });
   });
   
+  // Handle connection restart requests
+  socket.on('restart-request', async ({ roomId, userId, targetId }) => {
+    console.log(`Received restart request from ${userId} to ${targetId}`);
+    
+    const room = rooms.get(roomId);
+    if (!room) return;
+    
+    const targetParticipant = room.participants.get(targetId);
+    if (!targetParticipant) return;
+    
+    // Forward the restart request to the target user
+    io.to(targetParticipant.socketId).emit('restart-connection', {
+      roomId,
+      userId,
+      targetId: userId // The requester becomes the target for the response
+    });
+  });
+  
   // Handle publishing stream to SFU
   socket.on('publish', async ({ roomId, userId, sdp }) => {
     const room = rooms.get(roomId);
