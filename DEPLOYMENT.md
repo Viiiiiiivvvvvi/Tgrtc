@@ -103,8 +103,8 @@ export REDIS_HOST=<REDIS-SERVER-IP>
 export REDIS_PORT=6379
 export REDIS_PASSWORD=your_strong_password
 export SFU_SERVERS='[
-  {"id":"sfu-1","host":"<SFU-1-IP>","port":3001},
-  {"id":"sfu-2","host":"<SFU-2-IP>","port":3001}
+  {"id":"sfu-1","host":"45.76.155.224","port":3001},
+  {"id":"sfu-2","host":"216.128.136.217","port":3001}
 ]'
 ```
 
@@ -114,7 +114,7 @@ export SFU_SERVERS='[
 cd /opt/tgrtc
 
 # 克隆代码
-git clone <repository-url> .
+git clone https://github.com/Viiiiiiivvvvvi/Tgrtc .
 
 # 安装依赖
 npm install
@@ -191,23 +191,49 @@ sudo apt-get install -y redis-server
 # 备份原配置
 sudo cp /etc/redis/redis.conf /etc/redis/redis.conf.backup
 
+# 创建并设置数据目录权限
+sudo mkdir -p /var/lib/redis/data
+sudo chown -R redis:redis /var/lib/redis
+sudo chmod 770 /var/lib/redis/data
+
 # 配置Redis
 sudo tee /etc/redis/redis.conf > /dev/null <<EOT
 bind 0.0.0.0
 port 6379
-requirepass your_strong_password
-maxmemory 2gb
+requirepass vicky022
+maxmemory 1gb
 maxmemory-policy allkeys-lru
+
+# 持久化配置
 appendonly yes
 appendfsync everysec
+appendfilename "appendonly.aof"
+dir /var/lib/redis/data
+
+# 确保系统有足够的内存提交
+vm.overcommit_memory = 1
 EOT
 
-# 启动Redis服务
-sudo systemctl restart redis
-sudo systemctl enable redis
+# 设置内存过量使用参数
+echo vm.overcommit_memory=1 | sudo tee -a /etc/sysctl.conf
+sudo sysctl vm.overcommit_memory=1
+sudo sysctl -p
+
+# 重启Redis服务
+sudo systemctl restart redis-server
+
+
+# 禁用透明大页面
+echo never | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+echo 'echo never > /sys/kernel/mm/transparent_hugepage/enabled' | sudo tee -a /etc/rc.local
+sudo chmod +x /etc/rc.local
+
+# 重启Redis服务
+sudo systemctl restart redis-server
+sudo systemctl enable redis-server
 
 # 验证Redis状态
-redis-cli ping
+redis-cli -a vicky022 ping
 ```
 
 ### 4.2 Redis持久化配置
@@ -233,6 +259,7 @@ sudo chmod +x /etc/cron.daily/redis-backup
 ## 5. SFU服务器部署
 
 ### 5.1 环境变量配置
+sudo mkdir -p /opt/tgrtc-sfu
 
 在每台SFU服务器上创建 `/opt/tgrtc-sfu/.env` 文件：
 
@@ -240,21 +267,21 @@ sudo chmod +x /etc/cron.daily/redis-backup
 # SFU-1的配置
 export NODE_ENV=production
 export SFU_ID=sfu-1
-export SFU_HOST=<SFU-1-IP>
+export SFU_HOST=45.76.155.224
 export SFU_PORT=3001
-export REDIS_HOST=<REDIS-SERVER-IP>
+export REDIS_HOST=45.77.158.151
 export REDIS_PORT=6379
-export REDIS_PASSWORD=your_strong_password
+export REDIS_PASSWORD=vicky022
 export MAX_LOAD=50
 
 # SFU-2的配置（修改相应的SFU_ID和SFU_HOST）
 export NODE_ENV=production
 export SFU_ID=sfu-2
-export SFU_HOST=<SFU-2-IP>
+export SFU_HOST=216.128.136.217
 export SFU_PORT=3001
-export REDIS_HOST=<REDIS-SERVER-IP>
+export REDIS_HOST=45.77.158.151
 export REDIS_PORT=6379
-export REDIS_PASSWORD=your_strong_password
+export REDIS_PASSWORD=vicky022
 export MAX_LOAD=50
 ```
 
@@ -266,7 +293,7 @@ export MAX_LOAD=50
 cd /opt/tgrtc-sfu
 
 # 克隆代码（替换为实际的代码仓库地址）
-git clone <repository-url> .
+git clone https://github.com/Viiiiiiivvvvvi/Tgrtc .
 
 # 安装依赖
 npm install

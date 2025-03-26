@@ -23,7 +23,12 @@ function createPeerConnection(userId, roomId) {
   const pc = new wrtc.RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' }
+      { urls: 'stun:stun1.l.google.com:19302' },
+      {
+        urls: 'turn:208.83.236.198:3478',
+        username: 'vicky',
+        credential: 'vicky1022'
+      }
     ]
   });
   
